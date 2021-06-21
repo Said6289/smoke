@@ -4,6 +4,9 @@ This is a simple implementation of Jos Stam's
 [Stable Fluids](http://pages.cs.wisc.edu/~chaol/data/cs777/stam-stable_fluids.pdf)
 paper written in the [Odin](https://odin-lang.org) programming language.
 
+I would like to thank [Morten Vassvik](https://twitter.com/vassvik) for
+pointing me to the paper and helping me out with the math and conceptual stuff :)
+
 The code has only been tested on Linux.
 
 # Dependencies
