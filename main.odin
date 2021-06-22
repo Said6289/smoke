@@ -33,7 +33,6 @@ main :: proc() {
         glfw.poll_events();
 
         gl.ClearColor(1, 0, 0, 1);
-        gl.Clear(gl.COLOR_BUFFER_BIT);
 
         render(&opengl, WINDOW_WIDTH, WINDOW_HEIGHT);
 

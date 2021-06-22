@@ -380,7 +380,7 @@ init_opengl :: proc(opengl: ^OpenGL)
             xoff := x - startx;
 
             if xoff >= 0 && xoff < square && y >= starty && y < endy {
-                c = 1.0;
+                c = 5.0;
             }
 
             pixels[4 * (x + y * grid_w) + 0] = 0;
@@ -502,13 +502,13 @@ render :: proc(opengl: ^OpenGL, width: f32, height: f32)
     gl.BindBuffer(gl.ARRAY_BUFFER, opengl.vbo);
     gl.BindFramebuffer(gl.FRAMEBUFFER, opengl.framebuffer);
 
-    run_advection_program(&opengl.rk4_advection, opengl.texture[0], opengl.texture[0], opengl.texture[1]);
-    run_divergence_program(&opengl.divergence, opengl.texture[1], opengl.texture[2]);
+    run_divergence_program(&opengl.divergence, opengl.texture[0], opengl.texture[2]);
     for i := 0; i < 1000; i += 1 {
         run_jacobi_program(&opengl.jacobi, opengl.texture[3 + (i % 2)], opengl.texture[2], opengl.texture[4 - (i % 2)]);
     }
-    run_grad_sub_program(&opengl.grad_sub, opengl.texture[3], opengl.texture[1], opengl.texture[0]);
+    run_grad_sub_program(&opengl.grad_sub, opengl.texture[3], opengl.texture[0], opengl.texture[1]);
     run_advection_program(&opengl.rk4_advection, opengl.texture[6 + opengl.current_texture], opengl.texture[0], opengl.texture[7 - opengl.current_texture]);
+    run_advection_program(&opengl.rk4_advection, opengl.texture[1], opengl.texture[1], opengl.texture[0]);
 
     gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
     gl.Viewport(0, 0, i32(width), i32(height));
