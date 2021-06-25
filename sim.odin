@@ -1,7 +1,10 @@
 package main
 
 import "core:os"
+import "core:fmt"
 import gl "shared:odin-gl"
+
+WORK_GROUP_SIZE :: 32;
 
 stbtt_bakedchar :: struct {
    x0, y0, x1, y1: u16,
@@ -41,33 +44,28 @@ Vertex :: struct {
     uv: V2,
 }
 
-GradSubProgram :: struct {
+GradientProgram :: struct {
     handle: u32,
     field_uniform: i32,
     pressure_uniform: i32,
-    size_uniform: i32,
 }
 
 JacobiProgram :: struct {
     handle: u32,
     pressure_uniform: i32,
     divergence_uniform: i32,
-    size_uniform: i32,
 }
 
 DivergenceProgram :: struct {
     handle: u32,
     field_uniform: i32,
-    size_uniform: i32,
 }
 
 AdvectionProgram :: struct {
     handle: u32,
     field_uniform: i32,
     velocity_uniform: i32,
-    rk4_uniform: i32,
-    size_uniform: i32,
-    use_rk4: bool,
+    output_texture: u32,
 }
 
 Texture :: struct {
@@ -83,7 +81,7 @@ OpenGL :: struct {
     euler_advection: AdvectionProgram,
     divergence: DivergenceProgram,
     jacobi: JacobiProgram,
-    grad_sub: GradSubProgram,
+    gradient: GradientProgram,
 
     text_program: u32,
     texture_program: u32,
@@ -93,7 +91,8 @@ OpenGL :: struct {
 
     vao: u32,
     vbo: u32,
-    framebuffer: u32,
+    display_width: i32,
+    display_height: i32,
 
     font_texture: u32,
 
@@ -141,162 +140,127 @@ init_font_texture :: proc(opengl: ^OpenGL) -> FontInfo
     gl.BindTexture(gl.TEXTURE_2D, opengl.font_texture);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, result.width, result.height, 0, gl.RED, gl.UNSIGNED_BYTE, &result.font_bitmap[0]);
 
     return result;
 }
 
-send_quad :: proc(min_corner := V2{-1, -1}, max_corner := V2{1, 1})
-{
-    verts: [6]Vertex;
-
-    verts[0].p = V2{min_corner.x, min_corner.y};
-    verts[0].uv = V2{0,0};
-
-    verts[1].p = V2{max_corner.x, min_corner.y};
-    verts[1].uv = V2{1, 0};
-
-    verts[2].p = V2{max_corner.x, max_corner.y};
-    verts[2].uv = V2{1, 1};
-
-    verts[3].p = V2{max_corner.x, max_corner.y};
-    verts[3].uv = V2{1, 1};
-
-    verts[4].p = V2{min_corner.x, max_corner.y};
-    verts[4].uv = V2{0, 1};
-
-    verts[5].p = V2{min_corner.x, min_corner.y};
-    verts[5].uv = V2{0, 0};
-
-    gl.BufferData(gl.ARRAY_BUFFER, 6 * size_of(Vertex), &verts[0], gl.STREAM_DRAW);
-}
-
-init_advection_program :: proc(program: ^AdvectionProgram, use_rk4: bool)
+compile_compute_shader :: proc(program: $program_type, code: string)
 {
     ok := false;
-    program.handle, ok = gl.load_shaders_source(ndc_xy_vert_shader, advection_shader);
-    if !ok do panic("Failed to load advection proram");
+    program.handle, ok = gl.load_compute_source(code);
+    assert(ok);
+}
 
-    program.use_rk4 = use_rk4;
+bind_input_texture :: proc(texture: Texture, texture_unit: u32)
+{
+    gl.ActiveTexture(gl.TEXTURE0 + texture_unit);
+    gl.BindTexture(gl.TEXTURE_2D, texture.handle);
+}
 
-    program.field_uniform = gl.GetUniformLocation(program.handle, "Color");
-    program.velocity_uniform = gl.GetUniformLocation(program.handle, "Velocity");
-    program.rk4_uniform = gl.GetUniformLocation(program.handle, "UseRK4");
-    program.size_uniform = gl.GetUniformLocation(program.handle, "Size");
+bind_output_texture :: proc(texture: Texture)
+{
+    gl.BindImageTexture(0, texture.handle, 0, 0, 0, gl.WRITE_ONLY, gl.RGBA32F);
+}
+
+dispatch_compute :: proc(texture: Texture)
+{
+    assert(texture.width % WORK_GROUP_SIZE == 0);
+    assert(texture.height % WORK_GROUP_SIZE == 0);
+
+    gl.DispatchCompute(u32(texture.width) / WORK_GROUP_SIZE, u32(texture.height) / WORK_GROUP_SIZE, 1);
+    gl.MemoryBarrier(gl.ALL_BARRIER_BITS);
+}
+
+init_advection_program :: proc(program: ^AdvectionProgram, width, height: i32)
+{
+    compile_compute_shader(program, advection_shader);
+
+    program.field_uniform = gl.GetUniformLocation(program.handle, "field");
+    program.velocity_uniform = gl.GetUniformLocation(program.handle, "velocity");
 }
 
 run_advection_program :: proc(program: ^AdvectionProgram, in_texture: Texture, velocity_texture: Texture, out_texture: Texture)
 {
-    send_quad();
-
-    gl.ActiveTexture(gl.TEXTURE0);
-    gl.BindTexture(gl.TEXTURE_2D, in_texture.handle);
-
-    gl.ActiveTexture(gl.TEXTURE1);
-    gl.BindTexture(gl.TEXTURE_2D, velocity_texture.handle);
-
     gl.UseProgram(program.handle);
+
+    bind_input_texture(in_texture, 0);
+    bind_input_texture(velocity_texture, 1);
 
     gl.Uniform1i(program.field_uniform, 0);
     gl.Uniform1i(program.velocity_uniform, 1);
-    gl.Uniform1i(program.rk4_uniform, i32(program.use_rk4));
-    gl.Uniform2i(program.size_uniform, out_texture.width, out_texture.height);
 
-    gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out_texture.handle, 0);
-    gl.Viewport(0, 0, out_texture.width, out_texture.height);
-    gl.DrawArrays(gl.TRIANGLES, 0, 6);
+    bind_output_texture(out_texture);
+
+    dispatch_compute(out_texture);
 }
 
 init_divergence_program :: proc(program: ^DivergenceProgram)
 {
-    ok := false;
-    program.handle, ok = gl.load_shaders_source(ndc_xy_vert_shader, divergence_shader);
-    if !ok do panic("Failed to load divergence program");
+    compile_compute_shader(program, divergence_shader);
 
     program.field_uniform = gl.GetUniformLocation(program.handle, "Field");
-    program.size_uniform = gl.GetUniformLocation(program.handle, "Size");
 }
 
 run_divergence_program :: proc(program: ^DivergenceProgram, in_texture: Texture, out_texture: Texture)
 {
-    send_quad();
-
-    gl.ActiveTexture(gl.TEXTURE0);
-    gl.BindTexture(gl.TEXTURE_2D, in_texture.handle);
-
     gl.UseProgram(program.handle);
+
+    bind_input_texture(in_texture, 0);
 
     gl.Uniform1i(program.field_uniform, 0);
-    gl.Uniform2i(program.size_uniform, in_texture.width, in_texture.height);
 
-    gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out_texture.handle, 0);
-    gl.DrawArrays(gl.TRIANGLES, 0, 6);
+    bind_output_texture(out_texture);
+
+    dispatch_compute(out_texture);
 }
 
-init_grad_sub_program :: proc(program: ^GradSubProgram)
+init_gradient_program :: proc(program: ^GradientProgram)
 {
-    ok := false;
-    program.handle, ok = gl.load_shaders_source(ndc_xy_vert_shader, gradient_shader);
-    if !ok do panic("Failed to load gradient program");
+    compile_compute_shader(program, gradient_shader);
 
-    program.field_uniform = gl.GetUniformLocation(program.handle, "Field");
-    program.pressure_uniform = gl.GetUniformLocation(program.handle, "Pressure");
-    program.size_uniform = gl.GetUniformLocation(program.handle, "Size");
+    program.field_uniform = gl.GetUniformLocation(program.handle, "velocity");
+    program.pressure_uniform = gl.GetUniformLocation(program.handle, "pressure");
 }
 
-run_grad_sub_program :: proc(program: ^GradSubProgram, pressure: Texture, field: Texture, out_texture: Texture)
+run_gradient_program :: proc(program: ^GradientProgram, pressure: Texture, field: Texture, out_texture: Texture)
 {
-    send_quad();
-
-    gl.ActiveTexture(gl.TEXTURE0);
-    gl.BindTexture(gl.TEXTURE_2D, pressure.handle);
-
-    gl.ActiveTexture(gl.TEXTURE1);
-    gl.BindTexture(gl.TEXTURE_2D, field.handle);
-
     gl.UseProgram(program.handle);
+
+    bind_input_texture(pressure, 0);
+    bind_input_texture(field, 1);
 
     gl.Uniform1i(program.pressure_uniform, 0);
     gl.Uniform1i(program.field_uniform, 1);
-    gl.Uniform2i(program.size_uniform, out_texture.width, out_texture.height);
 
-    gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out_texture.handle, 0);
-    gl.Viewport(0, 0, out_texture.width, out_texture.height);
-    gl.DrawArrays(gl.TRIANGLES, 0, 6);
+    bind_output_texture(out_texture);
+
+    dispatch_compute(out_texture);
 }
 
 init_jacobi_program :: proc(program: ^JacobiProgram)
 {
-    ok := false;
-    program.handle, ok = gl.load_shaders_source(ndc_xy_vert_shader, jacobi_shader);
-    if !ok do panic("Failed to load gradient program");
+    compile_compute_shader(program, jacobi_shader);
 
-    program.pressure_uniform = gl.GetUniformLocation(program.handle, "Pressure");
-    program.divergence_uniform = gl.GetUniformLocation(program.handle, "Divergence");
-    program.size_uniform = gl.GetUniformLocation(program.handle, "Size");
+    program.pressure_uniform = gl.GetUniformLocation(program.handle, "pressure");
+    program.divergence_uniform = gl.GetUniformLocation(program.handle, "divergence");
 }
 
 run_jacobi_program :: proc(program: ^JacobiProgram, pressure: Texture, divergence: Texture, out_texture: Texture)
 {
-    send_quad();
-
-    gl.ActiveTexture(gl.TEXTURE0);
-    gl.BindTexture(gl.TEXTURE_2D, divergence.handle);
-
-    gl.ActiveTexture(gl.TEXTURE1);
-    gl.BindTexture(gl.TEXTURE_2D, pressure.handle);
-
     gl.UseProgram(program.handle);
+
+    bind_input_texture(divergence, 0);
+    bind_input_texture(pressure, 1);
 
     gl.Uniform1i(program.divergence_uniform, 0);
     gl.Uniform1i(program.pressure_uniform, 1);
-    gl.Uniform2i(program.size_uniform, out_texture.width, out_texture.height);
 
-    gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out_texture.handle, 0);
-    gl.Viewport(0, 0, out_texture.width, out_texture.height);
-    gl.DrawArrays(gl.TRIANGLES, 0, 6);
+    bind_output_texture(out_texture);
+
+    dispatch_compute(out_texture);
 }
 
 init_texture :: proc(width: i32, height: i32, pixels: []f32) -> Texture
@@ -313,9 +277,10 @@ init_texture :: proc(width: i32, height: i32, pixels: []f32) -> Texture
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
 
-    pixels_ptr: rawptr = nil;
-    if pixels != nil do pixels_ptr = &pixels[0];
-    gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, texture.width, texture.height, 0, gl.RGBA, gl.FLOAT, pixels_ptr);
+    gl.TexStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, texture.width, texture.height);
+    if pixels != nil {
+        gl.TexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, texture.width, texture.height, gl.RGBA, gl.FLOAT, &pixels[0]);
+    }
 
     return texture;
 }
@@ -333,8 +298,11 @@ init_opengl :: proc(opengl: ^OpenGL)
     ok := false;
 
     opengl.texture_program, ok = gl.load_shaders_source(ndc_xy_vert_shader, texture_frag_shader);
+    assert(ok);
     opengl.field_texture_program, ok = gl.load_shaders_source(ndc_xy_vert_shader, field_texture_frag_shader);
+    assert(ok);
     opengl.text_program, ok = gl.load_shaders_source(text_vert_shader_code, text_frag_shader_code);
+    assert(ok);
 
     gl.GenVertexArrays(1, &opengl.vao);
     gl.GenBuffers(1, &opengl.vbo);
@@ -356,15 +324,15 @@ init_opengl :: proc(opengl: ^OpenGL)
 
     opengl.font = init_font_texture(opengl);
 
-    gl.GenFramebuffers(1, &opengl.framebuffer);
-    init_advection_program(&opengl.rk4_advection, true);
     init_divergence_program(&opengl.divergence);
     init_jacobi_program(&opengl.jacobi);
-    init_grad_sub_program(&opengl.grad_sub);
+    init_gradient_program(&opengl.gradient);
 
     grid_w := 256;
     grid_h := 256;
     pixels := make([]f32, 4 * grid_w * grid_h);
+
+    init_advection_program(&opengl.rk4_advection, i32(grid_w), i32(grid_h));
 
     square :: 32;
     startx := (grid_w - square) / 2;
@@ -380,7 +348,7 @@ init_opengl :: proc(opengl: ^OpenGL)
             xoff := x - startx;
 
             if xoff >= 0 && xoff < square && y >= starty && y < endy {
-                c = 5.0;
+                c = 30.0;
             }
 
             pixels[4 * (x + y * grid_w) + 0] = 0;
@@ -419,7 +387,7 @@ init_opengl :: proc(opengl: ^OpenGL)
     }
 
     opengl.texture[6] = init_texture(i32(grid_w), i32(grid_h), pixels);
-    opengl.texture[7] = init_texture(i32(grid_w), i32(grid_h), pixels);
+    opengl.texture[7] = init_texture(i32(grid_w), i32(grid_h), nil);
 
     opengl.current_texture = 0;
 
@@ -472,6 +440,31 @@ push_text :: proc(opengl: ^OpenGL, _p: V2, text: string)
     }
 }
 
+send_quad :: proc(min_corner := V2{-1, -1}, max_corner := V2{1, 1})
+{
+    verts: [6]Vertex;
+
+    verts[0].p = V2{min_corner.x, min_corner.y};
+    verts[0].uv = V2{0,0};
+
+    verts[1].p = V2{max_corner.x, min_corner.y};
+    verts[1].uv = V2{1, 0};
+
+    verts[2].p = V2{max_corner.x, max_corner.y};
+    verts[2].uv = V2{1, 1};
+
+    verts[3].p = V2{max_corner.x, max_corner.y};
+    verts[3].uv = V2{1, 1};
+
+    verts[4].p = V2{min_corner.x, max_corner.y};
+    verts[4].uv = V2{0, 1};
+
+    verts[5].p = V2{min_corner.x, min_corner.y};
+    verts[5].uv = V2{0, 0};
+
+    gl.BufferData(gl.ARRAY_BUFFER, 6 * size_of(Vertex), &verts[0], gl.STREAM_DRAW);
+}
+
 slap_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_handle: u32)
 {
     send_quad(min_corner, max_corner);
@@ -496,46 +489,62 @@ slap_field_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, text
     gl.DrawArrays(gl.TRIANGLES, 0, 6);
 }
 
-render :: proc(opengl: ^OpenGL, width: f32, height: f32)
+begin_frame :: proc(opengl: ^OpenGL, width, height: i32)
 {
+    gl.Viewport(0, 0, width, height);
+    gl.Clear(gl.COLOR_BUFFER_BIT);
+
     gl.BindVertexArray(opengl.vao);
     gl.BindBuffer(gl.ARRAY_BUFFER, opengl.vbo);
-    gl.BindFramebuffer(gl.FRAMEBUFFER, opengl.framebuffer);
 
+    opengl.display_width = width;
+    opengl.display_height = height;
+}
+
+end_frame :: proc(opengl: ^OpenGL)
+{
+    gl.BufferData(gl.ARRAY_BUFFER, int(opengl.vertex_size * size_of(Vertex)), &opengl.vertices[0], gl.STREAM_DRAW);
+
+    gl.ActiveTexture(gl.TEXTURE0);
+    gl.BindTexture(gl.TEXTURE_2D, opengl.font_texture);
+
+    gl.UseProgram(opengl.text_program);
+    gl.Uniform2f(opengl.resolution_uniform, f32(opengl.display_width), f32(opengl.display_height));
+
+    gl.DrawArrays(gl.TRIANGLES, 0, i32(opengl.vertex_size));
+}
+
+render :: proc(opengl: ^OpenGL, width, height: i32)
+{
+    begin_frame(opengl, width, height);
+
+    iterations := 1000;
     run_divergence_program(&opengl.divergence, opengl.texture[0], opengl.texture[2]);
-    for i := 0; i < 1000; i += 1 {
-        run_jacobi_program(&opengl.jacobi, opengl.texture[3 + (i % 2)], opengl.texture[2], opengl.texture[4 - (i % 2)]);
+    {
+        query_block(.Pressure);
+        for i := 0; i < iterations; i += 1 {
+            run_jacobi_program(&opengl.jacobi, opengl.texture[3 + (i % 2)], opengl.texture[2], opengl.texture[4 - (i % 2)]);
+        }
     }
-    run_grad_sub_program(&opengl.grad_sub, opengl.texture[3], opengl.texture[0], opengl.texture[1]);
+    run_gradient_program(&opengl.gradient, opengl.texture[3], opengl.texture[0], opengl.texture[1]);
     run_advection_program(&opengl.rk4_advection, opengl.texture[6 + opengl.current_texture], opengl.texture[0], opengl.texture[7 - opengl.current_texture]);
     run_advection_program(&opengl.rk4_advection, opengl.texture[1], opengl.texture[1], opengl.texture[0]);
-
-    gl.BindFramebuffer(gl.FRAMEBUFFER, 0);
-    gl.Viewport(0, 0, i32(width), i32(height));
-    gl.Clear(gl.COLOR_BUFFER_BIT);
 
     slap_field_texture(opengl, V2{-1, -1}, V2{0, 1}, opengl.texture[1].handle);
     slap_texture(opengl, V2{0, -1}, V2{1, 1}, opengl.texture[7 - opengl.current_texture].handle);
 
     opengl.current_texture = 1 - opengl.current_texture;
 
-    { // NOTE(said): Text
+    // NOTE(said): Text
+    {
+        time, bandwidth := get_query_averages(.Pressure, int(opengl.texture[4].width * opengl.texture[4].height * 4 * 4 * 3 * i32(iterations)));
+
         opengl.vertex_size = 0;
 
-        buffer: [64]u8;
-        pen_y := 0;
-
-        push_text(opengl, V2{0, 0}, "Velocity");
+        push_text(opengl, V2{0, 0}, "Projection");
+        push_text(opengl, V2{0, opengl.font.pixel_height}, fmt.tprintf("Time: %f, Bandwidth: %f", time, bandwidth));
         push_text(opengl, V2{512, 0}, "Color");
-
-        gl.BufferData(gl.ARRAY_BUFFER, int(opengl.vertex_size * size_of(Vertex)), &opengl.vertices[0], gl.STREAM_DRAW);
-
-        gl.ActiveTexture(gl.TEXTURE0);
-        gl.BindTexture(gl.TEXTURE_2D, opengl.font_texture);
-
-        gl.UseProgram(opengl.text_program);
-        gl.Uniform2f(opengl.resolution_uniform, width, height);
-
-        gl.DrawArrays(gl.TRIANGLES, 0, i32(opengl.vertex_size));
     }
+
+    end_frame(opengl);
 }

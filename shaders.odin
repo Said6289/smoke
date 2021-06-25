@@ -45,7 +45,7 @@ text_frag_shader_code := `
     void main()
     {
         vec4 Alpha = texture(Font, UV);
-        FragColor = vec4(0.3, 0.3, 1.0, Alpha.r);
+        FragColor = vec4(1, 1, 1, Alpha.r);
     }
 `;
 
@@ -63,147 +63,6 @@ texture_frag_shader := `
     }
 `;
 
-advection_shader := `
-    #version 330
-
-    uniform sampler2D Color;
-    uniform sampler2D Velocity;
-    uniform bool UseRK4;
-    uniform ivec2 Size;
-
-    out vec4 FragColor;
-
-    float dt = 0.016;
-
-    vec2
-    compute_velocity(vec2 P)
-    {
-        return texture(Velocity, P).xy;
-    }
-
-    void main()
-    {
-        vec2 P = gl_FragCoord.xy / Size;
-
-        vec2 k1 = compute_velocity(P);
-
-        if (true) {
-            vec2 k2 = compute_velocity(P - dt * k1 * 0.5);
-            vec2 k3 = compute_velocity(P - dt * k2 * 0.5);
-            vec2 k4 = compute_velocity(P - dt * k3 * 1.0);
-
-            P = P - dt * (1.0 / 6.0) * (k1 + 2.0*(k2 + k3) + k4);
-        } else {
-            P = P - dt * k1;
-        }
-
-        FragColor = vec4(texture(Color, P).rgb, 1);
-    }
-`;
-
-divergence_shader := `
-    #version 330
-
-    uniform sampler2D Field;
-    uniform ivec2 Size;
-
-    out vec4 Output;
-
-    void main()
-    {
-        ivec2 P = ivec2(gl_FragCoord.xy - 0.5);
-
-        ivec2 PL = P + ivec2(-1,  0);
-        ivec2 PT = P + ivec2( 0,  1);
-        ivec2 PR = P + ivec2( 1,  0);
-        ivec2 PB = P + ivec2( 0, -1);
-
-        PL = clamp(PL, ivec2(0), Size - 1);
-        PT = clamp(PT, ivec2(0), Size - 1);
-        PR = clamp(PR, ivec2(0), Size - 1);
-        PB = clamp(PB, ivec2(0), Size - 1);
-
-        vec4 L = texelFetch(Field, PL, 0);
-        vec4 T = texelFetch(Field, PT, 0);
-        vec4 R = texelFetch(Field, PR, 0);
-        vec4 B = texelFetch(Field, PB, 0);
-
-        float Div = (R.x - L.x + T.y - B.y) * 0.5;
-
-        Output = vec4(Div, 0, 0, 1);
-    }
-`;
-
-jacobi_shader := `
-    #version 330
-
-    uniform sampler2D Pressure;
-    uniform sampler2D Divergence;
-
-    uniform ivec2 Size;
-
-    out vec4 Output;
-
-    void main()
-    {
-        ivec2 P = ivec2(gl_FragCoord.xy - 0.5);
-
-        ivec2 PL = P + ivec2(-1,  0);
-        ivec2 PT = P + ivec2( 0,  1);
-        ivec2 PR = P + ivec2( 1,  0);
-        ivec2 PB = P + ivec2( 0, -1);
-
-        PL = clamp(PL, ivec2(0), Size - 1);
-        PT = clamp(PT, ivec2(0), Size - 1);
-        PR = clamp(PR, ivec2(0), Size - 1);
-        PB = clamp(PB, ivec2(0), Size - 1);
-
-        vec3 L = texelFetch(Pressure, PL, 0).rgb;
-        vec3 T = texelFetch(Pressure, PT, 0).rgb;
-        vec3 R = texelFetch(Pressure, PR, 0).rgb;
-        vec3 B = texelFetch(Pressure, PB, 0).rgb;
-        vec3 Div = texelFetch(Divergence, P, 0).rgb;
-
-        vec3 Result = (L + T + R + B - Div) * 0.25;
-        Output = vec4(Result, 1);
-    }
-`;
-
-gradient_shader := `
-    #version 330
-
-    uniform sampler2D Field;
-    uniform sampler2D Pressure;
-    uniform ivec2 Size;
-
-    out vec4 Output;
-
-    void main()
-    {
-        ivec2 P = ivec2(gl_FragCoord.xy - 0.5);
-
-        ivec2 PL = P + ivec2(-1,  0);
-        ivec2 PT = P + ivec2( 0,  1);
-        ivec2 PR = P + ivec2( 1,  0);
-        ivec2 PB = P + ivec2( 0, -1);
-
-        PL = clamp(PL, ivec2(0), Size - 1);
-        PT = clamp(PT, ivec2(0), Size - 1);
-        PR = clamp(PR, ivec2(0), Size - 1);
-        PB = clamp(PB, ivec2(0), Size - 1);
-
-        float L = texelFetch(Pressure, PL, 0).r;
-        float T = texelFetch(Pressure, PT, 0).r;
-        float R = texelFetch(Pressure, PR, 0).r;
-        float B = texelFetch(Pressure, PB, 0).r;
-
-        vec2 Grad = vec2(R - L, T - B) / (2.0);
-        vec2 F = texelFetch(Field, P, 0).xy;
-
-        Output = vec4(F - Grad, 0, 1);
-    }
-`;
-
 field_texture_frag_shader := `
     #version 330
 
@@ -217,5 +76,156 @@ field_texture_frag_shader := `
         vec2 F = texture(Texture, UV).xy;
         F = (F + 1) / 2;
         FragColor = vec4(F.x, F.y, 0, 1);
+    }
+`;
+
+advection_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform writeonly image2D new_field;
+
+    uniform sampler2D field;
+    uniform sampler2D velocity;
+
+    float dt = 0.016;
+
+    vec2 compute_velocity(vec2 p)
+    {
+        return texture(velocity, p).xy;
+    }
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        vec2 size = vec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        vec2 uv = (vec2(p) + 0.5) / size;
+
+        vec2 k1 = compute_velocity(uv);
+        vec2 k2 = compute_velocity(uv - dt * k1 * 0.5);
+        vec2 k3 = compute_velocity(uv - dt * k2 * 0.5);
+        vec2 k4 = compute_velocity(uv - dt * k3 * 1.0);
+
+        uv -= dt * (1.0 / 6.0) * (k1 + 2.0*(k2 + k3) + k4);
+
+        imageStore(new_field, p, vec4(texture(field, uv).rgb, 1));
+    }
+`;
+
+divergence_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform writeonly image2D divergence;
+
+    uniform sampler2D Field;
+    uniform ivec2 Size;
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        ivec2 size = ivec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        ivec2 pL = p + ivec2(-1,  0);
+        ivec2 pT = p + ivec2( 0,  1);
+        ivec2 pR = p + ivec2( 1,  0);
+        ivec2 pB = p + ivec2( 0, -1);
+
+        pL = clamp(pL, ivec2(0), size - 1);
+        pT = clamp(pT, ivec2(0), size - 1);
+        pR = clamp(pR, ivec2(0), size - 1);
+        pB = clamp(pB, ivec2(0), size - 1);
+
+        vec4 l = texelFetch(Field, pL, 0);
+        vec4 t = texelFetch(Field, pT, 0);
+        vec4 r = texelFetch(Field, pR, 0);
+        vec4 b = texelFetch(Field, pB, 0);
+
+        float div = (r.x - l.x + t.y - b.y) * 0.5 * 0.5;
+
+        imageStore(divergence, p, vec4(div, 0, 0, 1));
+    }
+`;
+
+jacobi_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform writeonly image2D new_pressure;
+
+    uniform sampler2D pressure;
+    uniform sampler2D divergence;
+
+    vec3 pressure_sample(float x, float y)
+    {
+        return texelFetch(pressure, ivec2(x, y), 0).rgb;
+    }
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        ivec2 size = ivec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        float x = p.x;
+        float y = p.y;
+
+        vec3 l, t, r, b;
+
+        if (x == 0)          l = pressure_sample(x + 1, y);
+        else                 l = pressure_sample(x - 1, y);
+
+        if (y == size.y - 1) t = pressure_sample(x, y - 1);
+        else                 t = pressure_sample(x, y + 1);
+
+        if (x == size.x - 1) r = pressure_sample(x - 1, y);
+        else                 r = pressure_sample(x + 1, y);
+
+        if (y == 0)          b = pressure_sample(x, y + 1);
+        else                 b = pressure_sample(x, y - 1);
+
+        vec3 div = texelFetch(divergence, p, 0).rgb;
+
+        vec3 result = (l + t + r + b - 4*div) * 0.25;
+        imageStore(new_pressure, p, vec4(result, 1));
+    }
+`;
+
+gradient_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform writeonly image2D out_velocity;
+
+    uniform sampler2D velocity;
+    uniform sampler2D pressure;
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        ivec2 size = ivec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        ivec2 pL = p + ivec2(-1,  0);
+        ivec2 pT = p + ivec2( 0,  1);
+        ivec2 pR = p + ivec2( 1,  0);
+        ivec2 pB = p + ivec2( 0, -1);
+
+        pL = clamp(pL, ivec2(0), size - 1);
+        pT = clamp(pT, ivec2(0), size - 1);
+        pR = clamp(pR, ivec2(0), size - 1);
+        pB = clamp(pB, ivec2(0), size - 1);
+
+        float l = texelFetch(pressure, pL, 0).r;
+        float t = texelFetch(pressure, pT, 0).r;
+        float r = texelFetch(pressure, pR, 0).r;
+        float b = texelFetch(pressure, pB, 0).r;
+
+        vec2 grad = vec2(r - l, t - b) / (2.0 * 2.0);
+        vec2 vel = texelFetch(velocity, p, 0).xy;
+
+        if (p.x == 0 || p.x == size.x - 1) vel.x = 0;
+        if (p.y == 0 || p.y == size.y - 1) vel.y = 0;
+
+        imageStore(out_velocity, p, vec4(vel - grad, 0, 1));
     }
 `;

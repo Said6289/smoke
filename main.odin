@@ -29,12 +29,15 @@ main :: proc() {
     opengl: OpenGL;
     init_opengl(&opengl);
 
+    init_queries();
+
     for !glfw.window_should_close(window_handle) {
         glfw.poll_events();
 
         gl.ClearColor(1, 0, 0, 1);
 
         render(&opengl, WINDOW_WIDTH, WINDOW_HEIGHT);
+        check_queries();
 
         glfw.swap_buffers(window_handle);
     }
