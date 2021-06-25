@@ -117,10 +117,9 @@ divergence_shader := `
     #version 430
 
     layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
-    layout(rgba32f, binding = 0) uniform writeonly image2D divergence;
+    layout(r32f, binding = 0) uniform writeonly image2D divergence;
 
-    uniform sampler2D Field;
-    uniform ivec2 Size;
+    uniform sampler2D field;
 
     void main()
     {
@@ -137,10 +136,10 @@ divergence_shader := `
         pR = clamp(pR, ivec2(0), size - 1);
         pB = clamp(pB, ivec2(0), size - 1);
 
-        vec4 l = texelFetch(Field, pL, 0);
-        vec4 t = texelFetch(Field, pT, 0);
-        vec4 r = texelFetch(Field, pR, 0);
-        vec4 b = texelFetch(Field, pB, 0);
+        vec4 l = texelFetch(field, pL, 0);
+        vec4 t = texelFetch(field, pT, 0);
+        vec4 r = texelFetch(field, pR, 0);
+        vec4 b = texelFetch(field, pB, 0);
 
         float div = (r.x - l.x + t.y - b.y) * 0.5 * 0.5;
 
@@ -152,14 +151,14 @@ jacobi_shader := `
     #version 430
 
     layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
-    layout(rgba32f, binding = 0) uniform writeonly image2D new_pressure;
+    layout(r32f, binding = 0) uniform writeonly image2D new_pressure;
 
     uniform sampler2D pressure;
     uniform sampler2D divergence;
 
-    vec3 pressure_sample(float x, float y)
+    float pressure_sample(float x, float y)
     {
-        return texelFetch(pressure, ivec2(x, y), 0).rgb;
+        return texelFetch(pressure, ivec2(x, y), 0).r;
     }
 
     void main()
@@ -170,7 +169,7 @@ jacobi_shader := `
         float x = p.x;
         float y = p.y;
 
-        vec3 l, t, r, b;
+        float l, t, r, b;
 
         if (x == 0)          l = pressure_sample(x + 1, y);
         else                 l = pressure_sample(x - 1, y);
@@ -184,10 +183,10 @@ jacobi_shader := `
         if (y == 0)          b = pressure_sample(x, y + 1);
         else                 b = pressure_sample(x, y - 1);
 
-        vec3 div = texelFetch(divergence, p, 0).rgb;
+        float div = texelFetch(divergence, p, 0).r;
 
-        vec3 result = (l + t + r + b - 4*div) * 0.25;
-        imageStore(new_pressure, p, vec4(result, 1));
+        float result = (l + t + r + b - 4*div) * 0.25;
+        imageStore(new_pressure, p, vec4(result, 0, 0, 1));
     }
 `;
 

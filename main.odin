@@ -34,7 +34,7 @@ main :: proc() {
     for !glfw.window_should_close(window_handle) {
         glfw.poll_events();
 
-        gl.ClearColor(1, 0, 0, 1);
+        gl.ClearColor(0, 0, 0, 1);
 
         render(&opengl, WINDOW_WIDTH, WINDOW_HEIGHT);
         check_queries();
