@@ -75,8 +75,6 @@ Texture :: struct {
 }
 
 OpenGL :: struct {
-    query: u32,
-
     rk4_advection: AdvectionProgram,
     euler_advection: AdvectionProgram,
     divergence: DivergenceProgram,
@@ -96,8 +94,14 @@ OpenGL :: struct {
 
     font_texture: u32,
 
-    current_texture: int,
-    texture: [10]Texture,
+    initial_velocity_texture: Texture,
+    projected_velocity_texture: Texture,
+    divergence_texture: Texture,
+
+    jacobi_textures: [2]Texture,
+    color_textures: [2]Texture,
+
+    current_color_texture: int,
 
     vertices: []Vertex,
     vertex_capacity: u16,
@@ -287,8 +291,6 @@ init_texture :: proc(width: i32, height: i32, pixels: []f32) -> Texture
 
 init_opengl :: proc(opengl: ^OpenGL)
 {
-    gl.GenQueries(1, &opengl.query);
-
     gl.Enable(gl.BLEND);
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -358,10 +360,11 @@ init_opengl :: proc(opengl: ^OpenGL)
         }
     }
 
-    opengl.texture[0] = init_texture(i32(grid_w), i32(grid_w), pixels);
-    for i := 1; i < len(opengl.texture); i += 1 {
-        opengl.texture[i] = init_texture(i32(grid_w), i32(grid_h), nil);
-    }
+    opengl.initial_velocity_texture   = init_texture(i32(grid_w), i32(grid_w), pixels);
+    opengl.projected_velocity_texture = init_texture(i32(grid_w), i32(grid_w), pixels);
+    opengl.divergence_texture         = init_texture(i32(grid_w), i32(grid_w), pixels);
+    opengl.jacobi_textures[0]         = init_texture(i32(grid_w), i32(grid_w), pixels);
+    opengl.jacobi_textures[1]         = init_texture(i32(grid_w), i32(grid_w), pixels);
 
     grid_w = 512;
     grid_h = 512;
@@ -386,10 +389,8 @@ init_opengl :: proc(opengl: ^OpenGL)
         }
     }
 
-    opengl.texture[6] = init_texture(i32(grid_w), i32(grid_h), pixels);
-    opengl.texture[7] = init_texture(i32(grid_w), i32(grid_h), nil);
-
-    opengl.current_texture = 0;
+    opengl.color_textures[0] = init_texture(i32(grid_w), i32(grid_h), pixels);
+    opengl.color_textures[1] = init_texture(i32(grid_w), i32(grid_h), nil);
 
     delete(pixels);
 }
@@ -516,28 +517,37 @@ end_frame :: proc(opengl: ^OpenGL)
 
 render :: proc(opengl: ^OpenGL, width, height: i32)
 {
+    iterations :: 250;
+
     begin_frame(opengl, width, height);
 
-    iterations := 1000;
-    run_divergence_program(&opengl.divergence, opengl.texture[0], opengl.texture[2]);
+    run_divergence_program(&opengl.divergence, opengl.initial_velocity_texture, opengl.divergence_texture);
+
+    jacobi_texture_out: Texture;
     {
         query_block(.Pressure);
+
+        jacobi_texture_in  := opengl.jacobi_textures[0];
+        jacobi_texture_out  = opengl.jacobi_textures[1];
+
         for i := 0; i < iterations; i += 1 {
-            run_jacobi_program(&opengl.jacobi, opengl.texture[3 + (i % 2)], opengl.texture[2], opengl.texture[4 - (i % 2)]);
+            jacobi_texture_in, jacobi_texture_out = jacobi_texture_out, jacobi_texture_in;
+            run_jacobi_program(&opengl.jacobi, jacobi_texture_in, opengl.divergence_texture, jacobi_texture_out);
         }
     }
-    run_gradient_program(&opengl.gradient, opengl.texture[3], opengl.texture[0], opengl.texture[1]);
-    run_advection_program(&opengl.rk4_advection, opengl.texture[6 + opengl.current_texture], opengl.texture[0], opengl.texture[7 - opengl.current_texture]);
-    run_advection_program(&opengl.rk4_advection, opengl.texture[1], opengl.texture[1], opengl.texture[0]);
+    run_gradient_program(&opengl.gradient, jacobi_texture_out, opengl.initial_velocity_texture, opengl.projected_velocity_texture);
 
-    slap_field_texture(opengl, V2{-1, -1}, V2{0, 1}, opengl.texture[1].handle);
-    slap_texture(opengl, V2{0, -1}, V2{1, 1}, opengl.texture[7 - opengl.current_texture].handle);
+    run_advection_program(&opengl.rk4_advection, opengl.color_textures[opengl.current_color_texture], opengl.projected_velocity_texture, opengl.color_textures[1 - opengl.current_color_texture]);
+    run_advection_program(&opengl.rk4_advection, opengl.projected_velocity_texture, opengl.projected_velocity_texture, opengl.initial_velocity_texture);
 
-    opengl.current_texture = 1 - opengl.current_texture;
+    slap_texture      (opengl, V2{ 0, -1}, V2{1, 1}, opengl.color_textures[1 - opengl.current_color_texture].handle);
+    slap_field_texture(opengl, V2{-1, -1}, V2{0, 1}, opengl.projected_velocity_texture.handle);
+
+    opengl.current_color_texture = 1 - opengl.current_color_texture;
 
     // NOTE(said): Text
     {
-        time, bandwidth := get_query_averages(.Pressure, int(opengl.texture[4].width * opengl.texture[4].height * 4 * 4 * 3 * i32(iterations)));
+        time, bandwidth := get_query_averages(.Pressure, int(opengl.jacobi_textures[0].width * opengl.jacobi_textures[0].height * 4 * 4 * 3 * i32(iterations)));
 
         opengl.vertex_size = 0;
 
