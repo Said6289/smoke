@@ -83,9 +83,14 @@ OpenGL :: struct {
 
     text_program: u32,
     texture_program: u32,
-    field_texture_program: u32,
 
     resolution_uniform: i32,
+    use_color_coding_uniform: i32,
+    camera_p_uniform: i32,
+    camera_scale_uniform: i32,
+
+    camera_p: V2,
+    camera_scale: f32,
 
     vao: u32,
     vbo: u32,
@@ -301,9 +306,7 @@ init_opengl :: proc(opengl: ^OpenGL)
 
     opengl.texture_program, ok = gl.load_shaders_source(ndc_xy_vert_shader, texture_frag_shader);
     assert(ok);
-    opengl.field_texture_program, ok = gl.load_shaders_source(ndc_xy_vert_shader, field_texture_frag_shader);
-    assert(ok);
-    opengl.text_program, ok = gl.load_shaders_source(text_vert_shader_code, text_frag_shader_code);
+    opengl.text_program, ok = gl.load_shaders_source(text_vert_shader, text_frag_shader);
     assert(ok);
 
     gl.GenVertexArrays(1, &opengl.vao);
@@ -323,6 +326,13 @@ init_opengl :: proc(opengl: ^OpenGL)
     opengl.vertices = make([]Vertex, opengl.vertex_capacity);
 
     opengl.resolution_uniform = gl.GetUniformLocation(opengl.text_program, "Resolution");
+
+    opengl.camera_p_uniform = gl.GetUniformLocation(opengl.texture_program, "camera_p");
+    opengl.camera_scale_uniform = gl.GetUniformLocation(opengl.texture_program, "camera_scale");
+    opengl.use_color_coding_uniform = gl.GetUniformLocation(opengl.texture_program, "use_color_coding");
+
+    opengl.camera_p = {0, 0};
+    opengl.camera_scale = 1;
 
     opengl.font = init_font_texture(opengl);
 
@@ -467,7 +477,7 @@ send_quad :: proc(min_corner := V2{-1, -1}, max_corner := V2{1, 1})
     gl.BufferData(gl.ARRAY_BUFFER, 6 * size_of(Vertex), &verts[0], gl.STREAM_DRAW);
 }
 
-slap_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_handle: u32)
+slap_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_handle: u32, use_color_coding: bool = false)
 {
     send_quad(min_corner, max_corner);
 
@@ -476,23 +486,23 @@ slap_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_ha
     gl.ActiveTexture(gl.TEXTURE0);
     gl.BindTexture(gl.TEXTURE_2D, texture_handle);
 
-    gl.DrawArrays(gl.TRIANGLES, 0, 6);
-}
+    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-slap_field_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_handle: u32)
-{
-    send_quad(min_corner, max_corner);
-
-    gl.UseProgram(opengl.field_texture_program);
-
-    gl.ActiveTexture(gl.TEXTURE0);
-    gl.BindTexture(gl.TEXTURE_2D, texture_handle);
+    gl.Uniform1i(opengl.use_color_coding_uniform, i32(use_color_coding));
+    gl.Uniform2f(opengl.camera_p_uniform, opengl.camera_p.x, opengl.camera_p.y);
+    gl.Uniform1f(opengl.camera_scale_uniform, opengl.camera_scale);
 
     gl.DrawArrays(gl.TRIANGLES, 0, 6);
+
+    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 }
 
 begin_frame :: proc(opengl: ^OpenGL, width, height: i32)
 {
+    gl.ClearColor(0, 0, 0, 1);
+
     gl.Viewport(0, 0, width, height);
     gl.Clear(gl.COLOR_BUFFER_BIT);
 
@@ -541,8 +551,8 @@ render :: proc(opengl: ^OpenGL, width, height: i32)
     run_advection_program(&opengl.rk4_advection, opengl.color_textures[opengl.current_color_texture], opengl.projected_velocity_texture, opengl.color_textures[1 - opengl.current_color_texture]);
     run_advection_program(&opengl.rk4_advection, opengl.projected_velocity_texture, opengl.projected_velocity_texture, opengl.initial_velocity_texture);
 
-    slap_texture      (opengl, V2{ 0, -1}, V2{1, 1}, opengl.color_textures[1 - opengl.current_color_texture].handle);
-    slap_field_texture(opengl, V2{-1, -1}, V2{0, 1}, opengl.projected_velocity_texture.handle);
+    slap_texture(opengl, V2{ 0, -1}, V2{1, 1}, opengl.color_textures[1 - opengl.current_color_texture].handle);
+    slap_texture(opengl, V2{-1, -1}, V2{0, 1}, opengl.projected_velocity_texture.handle, true);
 
     opengl.current_color_texture = 1 - opengl.current_color_texture;
 

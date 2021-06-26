@@ -8,22 +8,26 @@ ndc_xy_vert_shader := `
 
     smooth out vec2 UV;
 
+    uniform vec2 camera_p;
+    uniform float camera_scale;
+
     void main()
     {
         UV = in_UV;
-        gl_Position = vec4(in_Position, 0.0, 1.0);
+        vec2 p = (in_Position - camera_p) * camera_scale;
+        gl_Position = vec4(p, 0, 1);
     }
 `;
 
-text_vert_shader_code := `
+text_vert_shader := `
     #version 330
 
     layout(location = 0) in vec2 in_Position;
     layout(location = 1) in vec2 in_UV;
 
-    uniform vec2 Resolution;
-
     smooth out vec2 UV;
+
+    uniform vec2 Resolution;
 
     void main()
     {
@@ -34,7 +38,7 @@ text_vert_shader_code := `
     }
 `;
 
-text_frag_shader_code := `
+text_frag_shader := `
     #version 330
 
     smooth in vec2 UV;
@@ -53,29 +57,20 @@ texture_frag_shader := `
     #version 330
 
     smooth in vec2 UV;
-    out vec4 FragColor;
+    out vec4 frag_color;
 
-    uniform sampler2D Texture;
-
-    void main()
-    {
-        FragColor = vec4(texture(Texture, UV).rgb, 1);
-    }
-`;
-
-field_texture_frag_shader := `
-    #version 330
-
-    smooth in vec2 UV;
-    out vec4 FragColor;
-
-    uniform sampler2D Texture;
+    uniform sampler2D in_texture;
+    uniform bool use_color_coding;
 
     void main()
     {
-        vec2 F = texture(Texture, UV).xy;
-        F = (F + 1) / 2;
-        FragColor = vec4(F.x, F.y, 0, 1);
+        if (use_color_coding) {
+            vec2 c = texture(in_texture, UV).xy;
+            c = (c + 1) / 2;
+            frag_color = vec4(c.x, c.y, 0, 1);
+        } else {
+            frag_color = vec4(texture(in_texture, UV).rgb, 1);
+        }
     }
 `;
 
