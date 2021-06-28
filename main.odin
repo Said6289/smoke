@@ -12,6 +12,7 @@ WINDOW_HEIGHT :: 720;
 WindowData :: struct {
     opengl: ^OpenGL,
     lmb_pressed: bool,
+    space_bar_pressed: bool,
     last_cursor_p: [2]f32,
 }
 
@@ -47,11 +48,13 @@ main :: proc() {
     glfw.set_cursor_pos_callback(window_handle, cursor_position_callback);
     glfw.set_scroll_callback(window_handle, scroll_callback);
     glfw.set_mouse_button_callback(window_handle, mouse_button_callback);
+    glfw.set_key_callback(window_handle, key_callback);
 
     for !glfw.window_should_close(window_handle) {
         glfw.poll_events();
 
         width, height := glfw.get_window_size(window_handle);
+        if window_data.space_bar_pressed do sim_step(&opengl);
         render(&opengl, i32(width), i32(height));
         check_queries();
 
@@ -100,7 +103,7 @@ scroll_callback :: proc "c" (window: glfw.Window_Handle, x, y: f64)
 
     initial_scale := opengl.camera_scale;
 
-    opengl.camera_scale += f32(y / 10);
+    opengl.camera_scale *= (1 + f32(y / 20));
     opengl.camera_scale = max(opengl.camera_scale, 0.05);
 
     // Cursor positions before and after the scale change in
@@ -129,5 +132,14 @@ mouse_button_callback :: proc "c" (window: glfw.Window_Handle, button, action, m
     if button == i32(glfw.MOUSE_BUTTON_LEFT) {
         if      action == i32(glfw.PRESS)   do lmb_pressed^ = true;
         else if action == i32(glfw.RELEASE) do lmb_pressed^ = false;
+    }
+}
+
+key_callback :: proc "c" (window: glfw.Window_Handle, key, scancode, action, mods: i32)
+{
+    window_data := cast(^WindowData)glfw_bindings.GetWindowUserPointer(window);
+    if (key == i32(glfw.KEY_SPACE)) {
+        if      action == i32(glfw.PRESS)   do window_data.space_bar_pressed = true;
+        else if action == i32(glfw.RELEASE) do window_data.space_bar_pressed = false;
     }
 }

@@ -1,6 +1,7 @@
 package main
 
 import "core:os"
+import "core:math"
 import "core:fmt"
 import gl "shared:odin-gl"
 
@@ -52,6 +53,14 @@ GradientProgram :: struct {
 
 JacobiProgram :: struct {
     handle: u32,
+    dx_sq_uniform: i32,
+    pressure_uniform: i32,
+    divergence_uniform: i32,
+}
+
+ResidualProgram :: struct {
+    handle: u32,
+    dx_uniform: i32,
     pressure_uniform: i32,
     divergence_uniform: i32,
 }
@@ -65,7 +74,17 @@ AdvectionProgram :: struct {
     handle: u32,
     field_uniform: i32,
     velocity_uniform: i32,
-    output_texture: u32,
+}
+
+ResampleProgram :: struct {
+    handle: u32,
+    input_uniform: i32,
+}
+
+CorrectionProgram :: struct {
+    handle: u32,
+    pressure_uniform: i32,
+    error_uniform: i32,
 }
 
 Texture :: struct {
@@ -74,18 +93,26 @@ Texture :: struct {
     height: i32,
 }
 
+GridLevel :: struct {
+    y0, y1, b, r, r_down, e_down, e: Texture,
+}
+
 OpenGL :: struct {
     rk4_advection: AdvectionProgram,
     euler_advection: AdvectionProgram,
     divergence: DivergenceProgram,
     jacobi: JacobiProgram,
+    residual: ResidualProgram,
+    resample: ResampleProgram,
+    correction: CorrectionProgram,
     gradient: GradientProgram,
+    zero_program: u32,
 
     text_program: u32,
     texture_program: u32,
 
     resolution_uniform: i32,
-    use_color_coding_uniform: i32,
+    color_coding_uniform: i32,
     camera_p_uniform: i32,
     camera_scale_uniform: i32,
 
@@ -102,11 +129,15 @@ OpenGL :: struct {
     initial_velocity_texture: Texture,
     projected_velocity_texture: Texture,
     divergence_texture: Texture,
+    down_residual_textures: [2]Texture,
+    error_textures: [2]Texture,
 
     pressure_textures: [2]Texture,
     color_textures: [2]Texture,
 
     current_color_texture: int,
+
+    levels: [3]GridLevel,
 
     vertices: []Vertex,
     vertex_capacity: u16,
@@ -249,15 +280,16 @@ run_gradient_program :: proc(program: ^GradientProgram, pressure: Texture, field
     dispatch_compute(out_texture);
 }
 
-init_jacobi_program :: proc(program: ^JacobiProgram)
+init_residual_program :: proc(program: ^ResidualProgram)
 {
-    compile_compute_shader(program, jacobi_shader);
+    compile_compute_shader(program, residual_shader);
 
+    program.dx_uniform = gl.GetUniformLocation(program.handle, "dx");
     program.pressure_uniform = gl.GetUniformLocation(program.handle, "pressure");
     program.divergence_uniform = gl.GetUniformLocation(program.handle, "divergence");
 }
 
-run_jacobi_program :: proc(program: ^JacobiProgram, pressure: Texture, divergence: Texture, out_texture: Texture)
+run_residual_program :: proc(program: ^ResidualProgram, pressure: Texture, divergence: Texture, out_texture: Texture)
 {
     gl.UseProgram(program.handle);
 
@@ -266,10 +298,86 @@ run_jacobi_program :: proc(program: ^JacobiProgram, pressure: Texture, divergenc
 
     gl.Uniform1i(program.divergence_uniform, 0);
     gl.Uniform1i(program.pressure_uniform, 1);
+    gl.Uniform1f(program.dx_uniform, 2);
 
     bind_output_texture(out_texture, gl.R32F);
 
     dispatch_compute(out_texture);
+}
+
+init_resample_program :: proc(program: ^ResampleProgram)
+{
+    compile_compute_shader(program, resample_shader);
+
+    program.input_uniform = gl.GetUniformLocation(program.handle, "in_texture");
+}
+
+run_resample_program :: proc(program: ^ResampleProgram, input: Texture, out_texture: Texture)
+{
+    gl.UseProgram(program.handle);
+
+    bind_input_texture(input, 0);
+
+    gl.Uniform1i(program.input_uniform, 0);
+
+    bind_output_texture(out_texture, gl.R32F);
+
+    dispatch_compute(out_texture);
+}
+
+init_correction_program :: proc(program: ^CorrectionProgram)
+{
+    compile_compute_shader(program, correction_shader);
+
+    program.pressure_uniform = gl.GetUniformLocation(program.handle, "pressure");
+    program.error_uniform = gl.GetUniformLocation(program.handle, "error");
+}
+
+run_correction_program :: proc(program: ^CorrectionProgram, pressure: Texture, error: Texture, out_texture: Texture)
+{
+    gl.UseProgram(program.handle);
+
+    bind_input_texture(pressure, 0);
+    bind_input_texture(error, 1);
+
+    gl.Uniform1i(program.pressure_uniform, 0);
+    gl.Uniform1i(program.error_uniform, 1);
+
+    bind_output_texture(out_texture, gl.R32F);
+
+    dispatch_compute(out_texture);
+}
+
+init_jacobi_program :: proc(program: ^JacobiProgram)
+{
+    compile_compute_shader(program, jacobi_shader);
+
+    program.dx_sq_uniform = gl.GetUniformLocation(program.handle, "dx_sq");
+    program.pressure_uniform = gl.GetUniformLocation(program.handle, "pressure");
+    program.divergence_uniform = gl.GetUniformLocation(program.handle, "divergence");
+}
+
+run_jacobi_program :: proc(program: ^JacobiProgram, dx_sq: f32, pressure: Texture, divergence: Texture, out_texture: Texture)
+{
+    gl.UseProgram(program.handle);
+
+    bind_input_texture(divergence, 0);
+    bind_input_texture(pressure, 1);
+
+    gl.Uniform1f(program.dx_sq_uniform, dx_sq);
+    gl.Uniform1i(program.divergence_uniform, 0);
+    gl.Uniform1i(program.pressure_uniform, 1);
+
+    bind_output_texture(out_texture, gl.R32F);
+
+    dispatch_compute(out_texture);
+}
+
+zero_texture :: proc(opengl: ^OpenGL, texture: Texture)
+{
+    gl.UseProgram(opengl.zero_program);
+    bind_output_texture(texture, gl.R32F);
+    dispatch_compute(texture);
 }
 
 init_texture :: proc(width: i32, height: i32, pixels: []f32, internal_format: u32 = gl.RGBA32F) -> Texture
@@ -292,6 +400,36 @@ init_texture :: proc(width: i32, height: i32, pixels: []f32, internal_format: u3
     }
 
     return texture;
+}
+
+add_radial_velocity_at :: proc(width, height: int, pixels: []f32)
+{
+    square :: 48;
+    startx := (width - square) / 2;
+    endx := startx + square;
+    starty := (height - square) / 2;
+    endy := starty + square;
+
+    for y := 0; y < width; y += 1 {
+        for x := 0; x < height; x += 1 {
+            c: f32 = 0.0;
+
+            yoff := y - starty;
+            xoff := x - startx;
+
+            _x := f32(xoff) - f32(square / 2);
+            _y := f32(yoff) - f32(square / 2);
+
+            if xoff >= 0 && xoff < square && yoff >= 0 && yoff < square {
+                c = 50.0;
+            }
+
+            pixels[4 * (x + y * width) + 0] = 0;
+            pixels[4 * (x + y * width) + 1] = c;
+            pixels[4 * (x + y * width) + 2] = 0;
+            pixels[4 * (x + y * width) + 3] = 0;
+        }
+    }
 }
 
 init_opengl :: proc(opengl: ^OpenGL)
@@ -329,53 +467,65 @@ init_opengl :: proc(opengl: ^OpenGL)
 
     opengl.camera_p_uniform = gl.GetUniformLocation(opengl.texture_program, "camera_p");
     opengl.camera_scale_uniform = gl.GetUniformLocation(opengl.texture_program, "camera_scale");
-    opengl.use_color_coding_uniform = gl.GetUniformLocation(opengl.texture_program, "use_color_coding");
+    opengl.color_coding_uniform = gl.GetUniformLocation(opengl.texture_program, "color_coding");
 
-    opengl.camera_p = {0, 0};
-    opengl.camera_scale = 1;
+    opengl.camera_p = {0.5, -0.5};
+    opengl.camera_scale = 0.25;
 
     opengl.font = init_font_texture(opengl);
 
     init_divergence_program(&opengl.divergence);
     init_jacobi_program(&opengl.jacobi);
+    init_residual_program(&opengl.residual);
+    init_resample_program(&opengl.resample);
+    init_correction_program(&opengl.correction);
     init_gradient_program(&opengl.gradient);
+    opengl.zero_program, ok = gl.load_compute_source(zero_shader);
+    assert(ok);
 
     grid_w := 256;
     grid_h := 256;
     pixels := make([]f32, 4 * grid_w * grid_h);
+    add_radial_velocity_at(grid_w, grid_h, pixels);
 
     init_advection_program(&opengl.rk4_advection, i32(grid_w), i32(grid_h));
 
-    square :: 32;
-    startx := (grid_w - square) / 2;
-    endx := startx + square;
-    starty := (grid_h - square) / 2;
-    endy := starty + square;
+    opengl.initial_velocity_texture   = init_texture(i32(grid_w), i32(grid_h), pixels, gl.RGBA32F);
+    opengl.projected_velocity_texture = init_texture(i32(grid_w), i32(grid_h), nil, gl.RGBA32F);
 
-    for y := 0; y < grid_w; y += 1 {
-        for x := 0; x < grid_h; x += 1 {
-            c: f32 = 0.0;
+    opengl.divergence_texture         = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
+    opengl.pressure_textures[0]       = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
+    opengl.pressure_textures[1]       = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
 
-            yoff := y - starty;
-            xoff := x - startx;
+    opengl.down_residual_textures[0]  = init_texture(i32(grid_w / 2), i32(grid_h / 2), nil, gl.R32F);
+    opengl.error_textures[0]          = init_texture(i32(grid_w / 2), i32(grid_h / 2), nil, gl.R32F);
 
-            if xoff >= 0 && xoff < square && y >= starty && y < endy {
-                c = 20.0;
-            }
+    opengl.down_residual_textures[1]  = init_texture(i32(grid_w / 4), i32(grid_h / 4), nil, gl.R32F);
+    opengl.error_textures[1]          = init_texture(i32(grid_w / 4), i32(grid_h / 4), nil, gl.R32F);
 
-            pixels[4 * (x + y * grid_w) + 0] = 0;
-            pixels[4 * (x + y * grid_w) + 1] = c;
-            pixels[4 * (x + y * grid_w) + 2] = 0;
-            pixels[4 * (x + y * grid_w) + 3] = 0;
-        }
-    }
+    opengl.levels[0].y0     = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
+    opengl.levels[0].y1     = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
+    opengl.levels[0].b      = opengl.divergence_texture;
+    opengl.levels[0].r      = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
+    opengl.levels[0].r_down = opengl.down_residual_textures[0];
+    opengl.levels[0].e_down = opengl.error_textures[0];
+    opengl.levels[0].e      = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
 
-    opengl.initial_velocity_texture   = init_texture(i32(grid_w), i32(grid_w), pixels, gl.RGBA32F);
-    opengl.projected_velocity_texture = init_texture(i32(grid_w), i32(grid_w), nil, gl.RGBA32F);
+    opengl.levels[1].y0     = init_texture(i32(grid_w / 2), i32(grid_h / 2), nil, gl.R32F);
+    opengl.levels[1].y1     = init_texture(i32(grid_w / 2), i32(grid_h / 2), nil, gl.R32F);
+    opengl.levels[1].b      = init_texture(i32(grid_w / 2), i32(grid_h / 2), nil, gl.R32F);
+    opengl.levels[1].r      = init_texture(i32(grid_w / 2), i32(grid_h / 2), nil, gl.R32F);
+    opengl.levels[1].r_down = init_texture(i32(grid_w / 4), i32(grid_h / 4), nil, gl.R32F);
+    opengl.levels[1].e_down = init_texture(i32(grid_w / 4), i32(grid_h / 4), nil, gl.R32F);
+    opengl.levels[1].e      = init_texture(i32(grid_w / 2), i32(grid_h / 2), nil, gl.R32F);
 
-    opengl.divergence_texture         = init_texture(i32(grid_w), i32(grid_w), nil, gl.R32F);
-    opengl.pressure_textures[0]         = init_texture(i32(grid_w), i32(grid_w), nil, gl.R32F);
-    opengl.pressure_textures[1]         = init_texture(i32(grid_w), i32(grid_w), nil, gl.R32F);
+    opengl.levels[2].y0     = init_texture(i32(grid_w / 4), i32(grid_h / 4), nil, gl.R32F);
+    opengl.levels[2].y1     = init_texture(i32(grid_w / 4), i32(grid_h / 4), nil, gl.R32F);
+    opengl.levels[2].b      = init_texture(i32(grid_w / 4), i32(grid_h / 4), nil, gl.R32F);
+    opengl.levels[2].r      = Texture{}; // unused
+    opengl.levels[2].r_down = Texture{}; // unused
+    opengl.levels[2].e_down = Texture{}; // unused
+    opengl.levels[2].e      = Texture{}; // unused
 
     grid_w = 512;
     grid_h = 512;
@@ -477,7 +627,7 @@ send_quad :: proc(min_corner := V2{-1, -1}, max_corner := V2{1, 1})
     gl.BufferData(gl.ARRAY_BUFFER, 6 * size_of(Vertex), &verts[0], gl.STREAM_DRAW);
 }
 
-slap_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_handle: u32, use_color_coding: bool = false)
+slap_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_handle: u32, color_coding: int = 0)
 {
     send_quad(min_corner, max_corner);
 
@@ -489,7 +639,7 @@ slap_texture :: proc(opengl: ^OpenGL, min_corner: V2, max_corner: V2, texture_ha
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-    gl.Uniform1i(opengl.use_color_coding_uniform, i32(use_color_coding));
+    gl.Uniform1i(opengl.color_coding_uniform, i32(color_coding));
     gl.Uniform2f(opengl.camera_p_uniform, opengl.camera_p.x, opengl.camera_p.y);
     gl.Uniform1f(opengl.camera_scale_uniform, opengl.camera_scale);
 
@@ -526,44 +676,85 @@ end_frame :: proc(opengl: ^OpenGL)
     gl.DrawArrays(gl.TRIANGLES, 0, i32(opengl.vertex_size));
 }
 
-render :: proc(opengl: ^OpenGL, width, height: i32)
+run_n_jacobi_iterations :: proc (opengl: ^OpenGL, iter_count: int, dx: f32, guess0: Texture, guess1: Texture, b: Texture)
 {
-    iterations :: 1000;
+    dx_sq := dx*dx;
 
-    begin_frame(opengl, width, height);
+    texture0: Texture = guess0;
+    texture1: Texture = guess1;
 
+    for i in 0..<iter_count {
+        run_jacobi_program(&opengl.jacobi, dx_sq, texture0, b, texture1);
+        texture0, texture1 = texture1, texture0;
+    }
+}
+
+cycles := 0;
+
+vcycle :: proc(opengl: ^OpenGL, index: u32)
+{
+    cycles += 1;
+
+    run_n_jacobi_iterations(opengl, 10, 2, opengl.levels[0].y0, opengl.levels[0].y1, opengl.levels[0].b);
+
+    if true {
+        run_residual_program(&opengl.residual, opengl.levels[0].y0, opengl.levels[0].b, opengl.levels[0].r);
+        run_resample_program(&opengl.resample, opengl.levels[0].r, opengl.levels[0].r_down);
+
+        zero_texture(opengl, opengl.levels[0].e_down);
+        run_n_jacobi_iterations(opengl, 100, 4, opengl.levels[0].e_down, opengl.levels[1].y0, opengl.levels[0].r_down);
+
+        if true {
+            run_residual_program(&opengl.residual, opengl.levels[0].e_down, opengl.levels[0].r_down, opengl.levels[1].r);
+            run_resample_program(&opengl.resample, opengl.levels[1].r, opengl.levels[1].r_down);
+
+            zero_texture(opengl, opengl.levels[1].e_down);
+            run_n_jacobi_iterations(opengl, 200, 8, opengl.levels[1].e_down, opengl.levels[2].y0, opengl.levels[1].r_down);
+
+            run_resample_program(&opengl.resample, opengl.levels[1].e_down, opengl.levels[1].e);
+            run_correction_program(&opengl.correction, opengl.levels[0].e_down, opengl.levels[1].e, opengl.levels[1].y0);
+
+            run_n_jacobi_iterations(opengl, 101, 4, opengl.levels[1].y0, opengl.levels[0].e_down, opengl.levels[0].r_down);
+        }
+
+        run_resample_program(&opengl.resample, opengl.levels[0].e_down, opengl.levels[0].e);
+        run_correction_program(&opengl.correction, opengl.levels[0].y0, opengl.levels[0].e, opengl.levels[0].y1);
+
+        run_n_jacobi_iterations(opengl, 10, 2, opengl.levels[0].y1, opengl.levels[0].y0, opengl.levels[0].b);
+    }
+}
+
+sim_step :: proc(opengl: ^OpenGL)
+{
     run_divergence_program(&opengl.divergence, opengl.initial_velocity_texture, opengl.divergence_texture);
 
-    pressure_texture_out: Texture;
-    {
-        query_block(.Pressure);
+    vcycle(opengl, 0);
 
-        pressure_texture_in  := opengl.pressure_textures[0];
-        pressure_texture_out  = opengl.pressure_textures[1];
+    run_gradient_program(&opengl.gradient, opengl.levels[0].y1, opengl.initial_velocity_texture, opengl.projected_velocity_texture);
+}
 
-        for i := 0; i < iterations; i += 1 {
-            pressure_texture_in, pressure_texture_out = pressure_texture_out, pressure_texture_in;
-            run_jacobi_program(&opengl.jacobi, pressure_texture_in, opengl.divergence_texture, pressure_texture_out);
-        }
-    }
-    run_gradient_program(&opengl.gradient, pressure_texture_out, opengl.initial_velocity_texture, opengl.projected_velocity_texture);
+render :: proc(opengl: ^OpenGL, width, height: i32)
+{
+    begin_frame(opengl, width, height);
 
-    run_advection_program(&opengl.rk4_advection, opengl.color_textures[opengl.current_color_texture], opengl.projected_velocity_texture, opengl.color_textures[1 - opengl.current_color_texture]);
-    run_advection_program(&opengl.rk4_advection, opengl.projected_velocity_texture, opengl.projected_velocity_texture, opengl.initial_velocity_texture);
+    slap_texture(opengl, V2{-1, -1}, V2{0,  1}, opengl.levels[0].r.handle, 2);
+    slap_texture(opengl, V2{-1, -3}, V2{0, -1}, opengl.levels[1].r.handle, 2);
 
-    slap_texture(opengl, V2{ 0, -1}, V2{1, 1}, opengl.color_textures[1 - opengl.current_color_texture].handle);
-    slap_texture(opengl, V2{-1, -1}, V2{0, 1}, opengl.projected_velocity_texture.handle, true);
+    slap_texture(opengl, V2{ 0, -1}, V2{1,  1}, opengl.levels[0].e.handle, 2);
+    slap_texture(opengl, V2{ 0, -3}, V2{1, -1}, opengl.levels[1].e.handle, 2);
+
+    slap_texture(opengl, V2{ 2, -1}, V2{3,  1}, opengl.projected_velocity_texture.handle, 1);
+    slap_texture(opengl, V2{ 2, -3}, V2{3, -1}, opengl.divergence_texture.handle, 2);
 
     opengl.current_color_texture = 1 - opengl.current_color_texture;
 
     // NOTE(said): Text
     {
-        time, bandwidth := get_query_averages(.Pressure, int(opengl.pressure_textures[0].width * opengl.pressure_textures[0].height * 4 * 3 * i32(iterations)));
-
         opengl.vertex_size = 0;
 
-        push_text(opengl, V2{0, 0}, "Projection (measurements broken for some reason)");
-        push_text(opengl, V2{0, opengl.font.pixel_height}, fmt.tprintf("Time: %f, Bandwidth: %f", time, bandwidth));
+        push_text(opengl, V2{0, 0*opengl.font.pixel_height}, fmt.tprintf("cycles: %d", cycles));
+        //push_text(opengl, V2{0, 1*opengl.font.pixel_height}, fmt.tprintf("error iterations: %d", error_iterations));
+        //push_text(opengl, V2{0, 2*opengl.font.pixel_height}, fmt.tprintf("post iterations: %d", post_iterations));
     }
 
     end_frame(opengl);

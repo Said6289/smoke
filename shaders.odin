@@ -60,16 +60,21 @@ texture_frag_shader := `
     out vec4 frag_color;
 
     uniform sampler2D in_texture;
-    uniform bool use_color_coding;
+    uniform int color_coding;
 
     void main()
     {
-        if (use_color_coding) {
+        if (color_coding == 0) {
+            frag_color = vec4(texture(in_texture, UV).rgb, 1);
+        } else if (color_coding == 1) {
             vec2 c = texture(in_texture, UV).xy;
             c = (c + 1) / 2;
             frag_color = vec4(c.x, c.y, 0, 1);
         } else {
-            frag_color = vec4(texture(in_texture, UV).rgb, 1);
+            float c = texture(in_texture, UV).r;
+            float pos =  max(c, 0);
+            float neg = -min(c, 0);
+            frag_color = vec4(pos, neg, 0, 1);
         }
     }
 `;
@@ -148,6 +153,7 @@ jacobi_shader := `
     layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
     layout(r32f, binding = 0) uniform writeonly image2D new_pressure;
 
+    uniform float dx_sq;
     uniform sampler2D pressure;
     uniform sampler2D divergence;
 
@@ -180,8 +186,56 @@ jacobi_shader := `
 
         float div = texelFetch(divergence, p, 0).r;
 
-        float result = (l + t + r + b - 4*div) * 0.25;
+        float result = (l + t + r + b - dx_sq*div) * 0.25;
         imageStore(new_pressure, p, vec4(result, 0, 0, 1));
+    }
+`;
+
+residual_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(r32f, binding = 0) uniform writeonly image2D residual;
+
+    uniform float dx;
+    uniform sampler2D pressure;
+    uniform sampler2D divergence;
+
+    float pressure_sample(float x, float y)
+    {
+        return texelFetch(pressure, ivec2(x, y), 0).r;
+    }
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        ivec2 size = ivec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        float x = p.x;
+        float y = p.y;
+
+        float l, t, r, b;
+
+        if (x == 0)          l = pressure_sample(x + 1, y);
+        else                 l = pressure_sample(x - 1, y);
+
+        if (y == size.y - 1) t = pressure_sample(x, y - 1);
+        else                 t = pressure_sample(x, y + 1);
+
+        if (x == size.x - 1) r = pressure_sample(x - 1, y);
+        else                 r = pressure_sample(x + 1, y);
+
+        if (y == 0)          b = pressure_sample(x, y + 1);
+        else                 b = pressure_sample(x, y - 1);
+
+        float c = pressure_sample(x, y);
+
+        float Ay = (l + t + r + b - 4 * c) / (dx*dx);
+        float div = texelFetch(divergence, p, 0).r;
+
+        float res = div - Ay;
+
+        imageStore(residual, p, vec4(res, 0, 0, 1));
     }
 `;
 
@@ -221,5 +275,59 @@ gradient_shader := `
         if (p.y == 0 || p.y == size.y - 1) vel.y = 0;
 
         imageStore(out_velocity, p, vec4(vel - grad, 0, 1));
+    }
+`;
+
+resample_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform writeonly image2D result;
+
+    uniform sampler2D in_texture;
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        ivec2 size = ivec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        vec2 uv = (vec2(p) + 0.5) / size;
+
+        imageStore(result, p, texture(in_texture, uv));
+    }
+`;
+
+correction_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform writeonly image2D result;
+
+    uniform sampler2D pressure;
+    uniform sampler2D error;
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        ivec2 size = ivec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        vec2 uv = (vec2(p) + 0.5) / size;
+
+        vec4 r = texture(pressure, uv) + texture(error, uv);
+
+        imageStore(result, p, r);
+    }
+`;
+
+zero_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform writeonly image2D result;
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        imageStore(result, p, vec4(0));
     }
 `;
