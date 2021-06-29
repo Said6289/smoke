@@ -99,7 +99,7 @@ GridLevel :: struct {
 
 MultiGridSolver :: struct {
     opengl: ^OpenGL,
-    levels: [3]GridLevel,
+    levels: [4]GridLevel,
     dx: f32,
     cycles: u32,
 }
@@ -169,6 +169,11 @@ init_multigrid_solver :: proc(opengl: ^OpenGL, grid_w, grid_h: i32, b: Texture, 
     solver.levels[1].r_down = init_texture(grid_w / 4, grid_h / 4, nil, gl.R32F);
     solver.levels[1].e_down = init_texture(grid_w / 4, grid_h / 4, nil, gl.R32F);
     solver.levels[2].y1     = init_texture(grid_w / 4, grid_h / 4, nil, gl.R32F);
+    solver.levels[2].y2     = init_texture(grid_w / 4, grid_h / 4, nil, gl.R32F);
+
+    solver.levels[2].r_down = init_texture(grid_w / 8, grid_h / 8, nil, gl.R32F);
+    solver.levels[2].e_down = init_texture(grid_w / 8, grid_h / 8, nil, gl.R32F);
+    solver.levels[3].y1     = init_texture(grid_w / 8, grid_h / 8, nil, gl.R32F);
 }
 
 run_n_jacobi_iterations :: proc (opengl: ^OpenGL, iter_count: int, dx: f32, guess0: Texture, guess1: Texture, b: Texture)
@@ -207,15 +212,19 @@ vcycle :: proc(solver: ^MultiGridSolver, index: int)
 
     switch index {
         case 0:
-            pre_smooth  = 1000;
-            post_smooth = 1000;
+            pre_smooth  = 2;
+            post_smooth = 2;
 
         case 1:
-            pre_smooth  = 50;
-            post_smooth = 50;
+            pre_smooth  = 4;
+            post_smooth = 4;
 
         case 2:
-            pre_smooth  = 1000;
+            pre_smooth  = 8;
+            post_smooth = 8;
+
+        case 3:
+            pre_smooth  = 32;
             post_smooth = 0;
     }
 
@@ -223,7 +232,7 @@ vcycle :: proc(solver: ^MultiGridSolver, index: int)
 
     run_n_jacobi_iterations(opengl, pre_smooth, dx, y0, y1, b);
 
-    if index < 2 {
+    if index < 3 {
         run_residual_program(&opengl.residual, dx, y0, b, y1);
         run_resample_program(&opengl.resample, y1, r_down);
 
@@ -232,7 +241,6 @@ vcycle :: proc(solver: ^MultiGridSolver, index: int)
 
         run_resample_program(&opengl.resample, e_down, y2);
         run_correction_program(&opengl.correction, y0, y2, y1);
-
         run_n_jacobi_iterations(opengl, post_smooth, dx, y1, y0, b);
     }
 }
@@ -554,7 +562,7 @@ add_radial_velocity_at :: proc(width, height: int, pixels: []f32)
             _y := f32(yoff) - f32(square / 2);
 
             if xoff >= 0 && xoff < square && yoff >= 0 && yoff < square {
-                c = 50.0;
+                c = 10.0;
             }
 
             pixels[4 * (x + y * width) + 0] = 0;
@@ -783,21 +791,24 @@ sim_step :: proc(opengl: ^OpenGL)
 {
     run_divergence_program(&opengl.divergence, opengl.initial_velocity_texture, opengl.divergence_texture);
 
-    vcycle(&opengl.multigrid_solver, 0);
+    for i in 0..<8 do vcycle(&opengl.multigrid_solver, 0);
 
     run_gradient_program(&opengl.gradient, opengl.multigrid_solver.levels[0].y1, opengl.initial_velocity_texture, opengl.projected_velocity_texture);
 
-    //run_advection_program(&opengl.rk4_advection, opengl.color_textures[opengl.current_color_texture], opengl.projected_velocity_texture, opengl.color_textures[1 - opengl.current_color_texture]);
-    //run_advection_program(&opengl.rk4_advection, opengl.projected_velocity_texture, opengl.projected_velocity_texture, opengl.initial_velocity_texture);
-    //opengl.current_color_texture = 1 - opengl.current_color_texture;
+    run_advection_program(&opengl.rk4_advection, opengl.color_textures[opengl.current_color_texture], opengl.projected_velocity_texture, opengl.color_textures[1 - opengl.current_color_texture]);
+    run_advection_program(&opengl.rk4_advection, opengl.projected_velocity_texture, opengl.projected_velocity_texture, opengl.initial_velocity_texture);
+    opengl.current_color_texture = 1 - opengl.current_color_texture;
 }
 
 render :: proc(opengl: ^OpenGL, width, height: i32)
 {
     begin_frame(opengl, width, height);
 
+    sim_step(opengl);
+
     slap_texture(opengl, V2{ 0, -1}, V2{1,  1}, opengl.projected_velocity_texture.handle, 1);
-    slap_texture(opengl, V2{ 0, -3}, V2{1, -1}, opengl.multigrid_solver.levels[0].r_down.handle, 2);
+    slap_texture(opengl, V2{ 1, -1}, V2{2,  1}, opengl.multigrid_solver.levels[0].r_down.handle, 2);
+    slap_texture(opengl, V2{ 0, -3}, V2{1, -1}, opengl.color_textures[opengl.current_color_texture].handle, 0);
 
     // NOTE(said): Text
     {
