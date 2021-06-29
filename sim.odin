@@ -176,6 +176,10 @@ init_multigrid_solver :: proc(opengl: ^OpenGL, grid_w, grid_h: i32, b: Texture, 
     solver.levels[3].y1     = init_texture(grid_w / 8, grid_h / 8, nil, gl.R32F);
 }
 
+// TODO(said): Make this take pointers to textures so it always puts the final
+// iteration back in guess0 so caller doesn't have to pass an even number to
+// make sure an iteration is not wasted or have to figure out where the final
+// iteration result is based on whether iter_count is odd or even
 run_n_jacobi_iterations :: proc (opengl: ^OpenGL, iter_count: int, dx: f32, guess0: Texture, guess1: Texture, b: Texture)
 {
     dx_sq := dx*dx;
@@ -210,6 +214,7 @@ vcycle :: proc(solver: ^MultiGridSolver, index: int)
     r_down := solver.levels[index].r_down;
     e_down := solver.levels[index].e_down;
 
+    // NOTE(said): The numbers should be configurable
     switch index {
         case 0:
             pre_smooth  = 2;
@@ -232,6 +237,8 @@ vcycle :: proc(solver: ^MultiGridSolver, index: int)
 
     run_n_jacobi_iterations(opengl, pre_smooth, dx, y0, y1, b);
 
+    // NOTE(said): The 3 can be replaced with the
+    // desired number of levels to run (ideally all of them)
     if index < 3 {
         run_residual_program(&opengl.residual, dx, y0, b, y1);
         run_resample_program(&opengl.resample, y1, r_down);
