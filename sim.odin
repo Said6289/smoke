@@ -2,6 +2,8 @@ package main
 
 import "core:os"
 import "core:math"
+import "core:intrinsics"
+import "core:math/linalg"
 import "core:fmt"
 import gl "shared:odin-gl"
 
@@ -26,10 +28,7 @@ foreign stbtt {
     stbtt_GetScaledFontVMetrics :: proc (fontdata: ^u8, index: i32, size: f32, ascent, descent, line_gap: ^f32) ---;
 }
 
-V2 :: struct {
-    x: f32,
-    y: f32,
-}
+V2 :: [2]f32;
 
 FontInfo :: struct {
     chars: []stbtt_bakedchar,
@@ -114,6 +113,7 @@ OpenGL :: struct {
     correction: CorrectionProgram,
     gradient: GradientProgram,
     zero_program: u32,
+    smoke_emit_program: u32,
 
     multigrid_solver: MultiGridSolver,
 
@@ -174,6 +174,8 @@ init_multigrid_solver :: proc(opengl: ^OpenGL, grid_w, grid_h: i32, b: Texture, 
     solver.levels[2].r_down = init_texture(grid_w / 8, grid_h / 8, nil, gl.R32F);
     solver.levels[2].e_down = init_texture(grid_w / 8, grid_h / 8, nil, gl.R32F);
     solver.levels[3].y1     = init_texture(grid_w / 8, grid_h / 8, nil, gl.R32F);
+
+    zero_texture(opengl, solver.levels[0].y0);
 }
 
 // TODO(said): Make this take pointers to textures so it always puts the final
@@ -193,26 +195,87 @@ run_n_jacobi_iterations :: proc (opengl: ^OpenGL, iter_count: int, dx: f32, gues
     }
 }
 
+get_level :: proc(solver: ^MultiGridSolver, index: int) -> GridLevel
+{
+    result: GridLevel;
+
+    if index == 0 {
+        result.y0     = solver.levels[0].y0;
+        result.b      = solver.levels[0].b;
+    } else {
+        result.y0     = solver.levels[index - 1].e_down;
+        result.b      = solver.levels[index - 1].r_down;
+    }
+
+    result.y1     = solver.levels[index].y1;
+    result.y2     = solver.levels[index].y2;
+    result.r_down = solver.levels[index].r_down;
+    result.e_down = solver.levels[index].e_down;
+
+    return result;
+}
+
 vcycle :: proc(solver: ^MultiGridSolver, index: int)
+{
+    dx := solver.dx;
+    opengl := solver.opengl;
+
+    l := get_level(solver, 0);
+    run_n_jacobi_iterations(opengl, 2, dx, l.y0, l.y1, l.b);
+
+    {
+        run_residual_program(&opengl.residual, dx, l.y0, l.b, l.y1);
+        run_resample_program(&opengl.resample, l.y1, l.r_down);
+
+        zero_texture(opengl, l.e_down);
+
+        l = get_level(solver, 1);
+        run_n_jacobi_iterations(opengl, 4, dx*2, l.y0, l.y1, l.b);
+        {
+            run_residual_program(&opengl.residual, dx*2, l.y0, l.b, l.y1);
+            run_resample_program(&opengl.resample, l.y1, l.r_down);
+
+            zero_texture(opengl, l.e_down);
+
+            l = get_level(solver, 2);
+            run_n_jacobi_iterations(opengl, 8, dx*4, l.y0, l.y1, l.b);
+            {
+                run_residual_program(&opengl.residual, dx*4, l.y0, l.b, l.y1);
+                run_resample_program(&opengl.resample, l.y1, l.r_down);
+
+                zero_texture(opengl, l.e_down);
+
+                l = get_level(solver, 3);
+                run_n_jacobi_iterations(opengl, 100, dx*8, l.y0, l.y1, l.b);
+                l = get_level(solver, 2);
+
+                run_resample_program(&opengl.resample, l.e_down, l.y2);
+                run_correction_program(&opengl.correction, l.y0, l.y2, l.y1);
+                run_n_jacobi_iterations(opengl, 8 + 1, dx*4, l.y1, l.y0, l.b);
+            }
+            l = get_level(solver, 1);
+
+            run_resample_program(&opengl.resample, l.e_down, l.y2);
+            run_correction_program(&opengl.correction, l.y0, l.y2, l.y1);
+            run_n_jacobi_iterations(opengl, 4 + 1, dx*2, l.y1, l.y0, l.b);
+        }
+        l = get_level(solver, 0);
+
+        run_resample_program(&opengl.resample, l.e_down, l.y2);
+        run_correction_program(&opengl.correction, l.y0, l.y2, l.y1);
+        run_n_jacobi_iterations(opengl, 2 + 1, dx, l.y1, l.y0, l.b);
+    }
+}
+
+vcycle_recursive :: proc(solver: ^MultiGridSolver, index: int)
 {
     if index == 0 do solver.cycles += 1;
 
-    y0, b: Texture;
-    pre_smooth, post_smooth: int;
-    dx := solver.dx * math.pow(2, f32(index));
+    dx := math.pow(2, f32(index)) * solver.dx;
+    opengl := solver.opengl;
 
-    if index == 0 {
-        y0     = solver.levels[0].y0;
-        b      = solver.levels[0].b;
-    } else {
-        y0     = solver.levels[index - 1].e_down;
-        b      = solver.levels[index - 1].r_down;
-    }
-
-    y1     := solver.levels[index].y1;
-    y2     := solver.levels[index].y2;
-    r_down := solver.levels[index].r_down;
-    e_down := solver.levels[index].e_down;
+    pre_smooth := 2;
+    post_smooth := 2;
 
     // NOTE(said): The numbers should be configurable
     switch index {
@@ -229,26 +292,23 @@ vcycle :: proc(solver: ^MultiGridSolver, index: int)
             post_smooth = 8;
 
         case 3:
-            pre_smooth  = 32;
-            post_smooth = 0;
+            pre_smooth  = 100;
+            post_smooth = 100;
     }
 
-    opengl := solver.opengl;
+    l := get_level(solver, index);
+    run_n_jacobi_iterations(opengl, pre_smooth, dx, l.y0, l.y1, l.b);
 
-    run_n_jacobi_iterations(opengl, pre_smooth, dx, y0, y1, b);
-
-    // NOTE(said): The 3 can be replaced with the
-    // desired number of levels to run (ideally all of them)
     if index < 3 {
-        run_residual_program(&opengl.residual, dx, y0, b, y1);
-        run_resample_program(&opengl.resample, y1, r_down);
+        run_residual_program(&opengl.residual, dx, l.y0, l.b, l.y1);
+        run_resample_program(&opengl.resample, l.y1, l.r_down);
 
-        zero_texture(opengl, e_down);
-        vcycle(solver, index + 1);
+        zero_texture(opengl, l.e_down);
+        vcycle_recursive(solver, index + 1);
 
-        run_resample_program(&opengl.resample, e_down, y2);
-        run_correction_program(&opengl.correction, y0, y2, y1);
-        run_n_jacobi_iterations(opengl, post_smooth, dx, y1, y0, b);
+        run_resample_program(&opengl.resample, l.e_down, l.y2);
+        run_correction_program(&opengl.correction, l.y0, l.y2, l.y1);
+        run_n_jacobi_iterations(opengl, post_smooth + 1, dx, l.y1, l.y0, l.b);
     }
 }
 
@@ -306,9 +366,11 @@ bind_input_texture :: proc(texture: Texture, texture_unit: u32)
     gl.BindTexture(gl.TEXTURE_2D, texture.handle);
 }
 
-bind_output_texture :: proc(texture: Texture, internal_format: u32 = gl.RGBA32F)
+bind_output_texture :: proc(texture: Texture, internal_format: u32 = gl.RGBA32F, read_write: bool = false)
 {
-    gl.BindImageTexture(0, texture.handle, 0, 0, 0, gl.WRITE_ONLY, internal_format);
+    access_mode : u32 = gl.WRITE_ONLY;
+    if read_write do access_mode = gl.READ_WRITE;
+    gl.BindImageTexture(0, texture.handle, 0, 0, 0, access_mode, internal_format);
 }
 
 dispatch_compute :: proc(texture: Texture)
@@ -317,7 +379,6 @@ dispatch_compute :: proc(texture: Texture)
     assert(texture.height % WORK_GROUP_SIZE == 0);
 
     gl.DispatchCompute(u32(texture.width) / WORK_GROUP_SIZE, u32(texture.height) / WORK_GROUP_SIZE, 1);
-    gl.MemoryBarrier(gl.ALL_BARRIER_BITS);
 }
 
 init_advection_program :: proc(program: ^AdvectionProgram, width, height: i32)
@@ -550,9 +611,9 @@ init_b :: proc(width, height: int, pixels: []f32)
     }
 }
 
-add_radial_velocity_at :: proc(width, height: int, pixels: []f32)
+init_velocity_field :: proc(width, height: int, pixels: []f32)
 {
-    square :: 48;
+    square :: 64;
     startx := (width - square) / 2;
     endx := startx + square;
     starty := (height - square) / 2;
@@ -578,6 +639,14 @@ add_radial_velocity_at :: proc(width, height: int, pixels: []f32)
             pixels[4 * (x + y * width) + 3] = 0;
         }
     }
+}
+
+emit_smoke :: proc(opengl: ^OpenGL, p: V2, radius: f32)
+{
+    gl.UseProgram(opengl.smoke_emit_program);
+    texture := opengl.color_textures[opengl.current_color_texture];
+    bind_output_texture(texture, gl.RGBA32F, true);
+    dispatch_compute(texture);
 }
 
 init_opengl :: proc(opengl: ^OpenGL)
@@ -630,48 +699,28 @@ init_opengl :: proc(opengl: ^OpenGL)
     init_gradient_program(&opengl.gradient);
     opengl.zero_program, ok = gl.load_compute_source(zero_shader);
     assert(ok);
+    opengl.smoke_emit_program, ok = gl.load_compute_source(smoke_emit_shader);
+    assert(ok);
 
-    grid_w := 256;
-    grid_h := 256;
+    grid_w := 512;
+    grid_h := 512;
     pixels := make([]f32, 4 * grid_w * grid_h);
 
     init_advection_program(&opengl.rk4_advection, i32(grid_w), i32(grid_h));
 
-    add_radial_velocity_at(grid_w, grid_h, pixels);
+    init_velocity_field(grid_w, grid_h, pixels);
     opengl.initial_velocity_texture   = init_texture(i32(grid_w), i32(grid_h), pixels, gl.RGBA32F);
 
     opengl.projected_velocity_texture = init_texture(i32(grid_w), i32(grid_h), nil, gl.RGBA32F);
     opengl.divergence_texture         = init_texture(i32(grid_w), i32(grid_h), nil, gl.R32F);
 
+
     init_multigrid_solver(opengl, i32(grid_w), i32(grid_h), opengl.divergence_texture, 2);
 
-    grid_w = 512;
-    grid_h = 512;
-
     delete(pixels);
-    pixels = make([]f32, 4 * grid_w * grid_h);
 
-    checker_size := 64;
-    checkers_in_a_row := (grid_w + checker_size - 1) / checker_size;
-
-    for y := 0; y < grid_h; y += 1 {
-        for x := 0; x < grid_w; x += 1 {
-            checker_x := x / checker_size;
-            checker_y := y / checker_size;
-
-            c := f32(((checker_x % 2) + (checker_y % 2)) % 2);
-
-            pixels[4 * (x + y * grid_w) + 0] = c;
-            pixels[4 * (x + y * grid_w) + 1] = c;
-            pixels[4 * (x + y * grid_w) + 2] = c;
-            pixels[4 * (x + y * grid_w) + 3] = 1;
-        }
-    }
-
-    opengl.color_textures[0] = init_texture(i32(grid_w), i32(grid_h), pixels, gl.RGBA32F);
-    opengl.color_textures[1] = init_texture(i32(grid_w), i32(grid_h), nil,    gl.RGBA32F);
-
-    delete(pixels);
+    opengl.color_textures[0] = init_texture(i32(grid_w), i32(grid_h), nil, gl.RGBA32F);
+    opengl.color_textures[1] = init_texture(i32(grid_w), i32(grid_h), nil, gl.RGBA32F);
 }
 
 push_vertex :: proc(opengl: ^OpenGL, p: V2, uv := V2{})
@@ -800,7 +849,7 @@ sim_step :: proc(opengl: ^OpenGL)
 
     for i in 0..<8 do vcycle(&opengl.multigrid_solver, 0);
 
-    run_gradient_program(&opengl.gradient, opengl.multigrid_solver.levels[0].y1, opengl.initial_velocity_texture, opengl.projected_velocity_texture);
+    run_gradient_program(&opengl.gradient, opengl.multigrid_solver.levels[0].y0, opengl.initial_velocity_texture, opengl.projected_velocity_texture);
 
     run_advection_program(&opengl.rk4_advection, opengl.color_textures[opengl.current_color_texture], opengl.projected_velocity_texture, opengl.color_textures[1 - opengl.current_color_texture]);
     run_advection_program(&opengl.rk4_advection, opengl.projected_velocity_texture, opengl.projected_velocity_texture, opengl.initial_velocity_texture);

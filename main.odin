@@ -54,7 +54,10 @@ main :: proc() {
         glfw.poll_events();
 
         width, height := glfw.get_window_size(window_handle);
-        if window_data.space_bar_pressed do sim_step(&opengl);
+        if window_data.space_bar_pressed {
+            //sim_step(&opengl);
+            emit_smoke(&opengl, V2{}, 0);
+        }
         render(&opengl, i32(width), i32(height));
         check_queries();
 

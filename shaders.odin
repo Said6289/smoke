@@ -331,3 +331,26 @@ zero_shader := `
         imageStore(result, p, vec4(0));
     }
 `;
+
+smoke_emit_shader := `
+    #version 430
+
+    layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+    layout(rgba32f, binding = 0) uniform image2D density;
+
+    void main()
+    {
+        ivec2 p = ivec2(gl_WorkGroupID.xy * gl_WorkGroupSize.xy + gl_LocalInvocationID.xy);
+        ivec2 size = ivec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy);
+
+        vec2 dist = p - vec2(size / 2);
+        float radius = 100.0;
+        float radius_sq = radius * radius;
+        float c = 1 - dot(dist, dist) / radius_sq;
+        c = clamp(c, 0, 1);
+
+        vec4 d = imageLoad(density, p);
+        d += vec4(c, 0, 0, 0);
+        imageStore(density, p, d);
+    }
+`;
